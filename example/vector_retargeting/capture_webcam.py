@@ -5,7 +5,7 @@ import cv2
 import tyro
 
 
-def main(video_path: str, video_capture_device: Union[str, int] = 0):
+def main(video_path: str, video_capture_device: Union[str, int] = 4):
     """
     Capture video with the camera connected to your computer. Press `q` to end the recording.
 

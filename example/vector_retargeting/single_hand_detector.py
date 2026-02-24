@@ -1,7 +1,7 @@
 import mediapipe as mp
-import mediapipe.framework as framework
+# import mediapipe.framework as framework
 import numpy as np
-from mediapipe.framework.formats import landmark_pb2
+# from mediapipe.framework.formats import landmark_pb2
 from mediapipe.python.solutions import hands_connections
 from mediapipe.python.solutions.drawing_utils import DrawingSpec
 from mediapipe.python.solutions.hands import HandLandmark
@@ -46,7 +46,7 @@ class SingleHandDetector:
 
     @staticmethod
     def draw_skeleton_on_image(
-        image, keypoint_2d: landmark_pb2.NormalizedLandmarkList, style="white"
+        image, keypoint_2d, style="white"
     ):
         if style == "default":
             mp.solutions.drawing_utils.draw_landmarks(
@@ -106,7 +106,7 @@ class SingleHandDetector:
 
     @staticmethod
     def parse_keypoint_3d(
-        keypoint_3d: framework.formats.landmark_pb2.LandmarkList,
+        keypoint_3d,
     ) -> np.ndarray:
         keypoint = np.empty([21, 3])
         for i in range(21):
@@ -117,7 +117,7 @@ class SingleHandDetector:
 
     @staticmethod
     def parse_keypoint_2d(
-        keypoint_2d: landmark_pb2.NormalizedLandmarkList, img_size
+        keypoint_2d, img_size
     ) -> np.ndarray:
         keypoint = np.empty([21, 2])
         for i in range(21):
