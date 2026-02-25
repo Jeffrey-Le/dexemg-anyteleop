@@ -84,24 +84,24 @@ def pin_to_sapien_q(pin_q):
 
 # --- Initial pose ---
 q_init = pin.neutral(model)
-# q_init[0] = -0.26
-q_init[0] = 2.0
+q_init[0] = -0.26
+# q_init[0] = 1.0
 q_init[1] = -1.25
 q_init[2] = np.pi/2
 q_init[3] = -0.35
 q_init[4] = 1.5
-# q_init[5] = 1.5
+q_init[5] = 1.5
 
 configuration = pink.Configuration(model, data, q_init)
 configuration.update(q_init)
 robot.set_qpos(q_init)
 
 init_palm = configuration.get_transform_frame_to_world("palm")
-# print("init palm position:", init_palm.translation)
-# print("init palm rotation:\n", init_palm.rotation)
+print("init palm position:", init_palm.translation)
+print("init palm rotation:\n", init_palm.rotation)
 
-palm_task = FrameTask("palm", position_cost=1.0, orientation_cost=1.0)
-posture_task = PostureTask(cost=2e-1)
+palm_task = FrameTask("palm", position_cost=1.0, orientation_cost=3.0)
+posture_task = PostureTask(cost=3e-1)
 posture_task.set_target(q_init)
 palm_task.set_target(init_palm)
 
@@ -253,13 +253,13 @@ R_cam_to_sim = np.array([
 init_pos = init_palm.translation.copy()
 sim_x_fixed = init_pos[0]
 sim_x_range_phy = (0.2, 0.5)
-sim_x_range_sim = (init_pos[0] - 0.4, init_pos[0] + 0.4)  # wider sim range
+sim_x_range_sim = (init_pos[0] - 0.8, init_pos[0] + 0.8)  # wider sim range
 sim_y_range = (init_pos[1] - 0.3, init_pos[1] + 0.3)
 sim_z_range = (init_pos[2] - 0.2, init_pos[2] + 0.2)
 
-alpha = 0.05
+alpha = 0.2
 rotation_alpha = 0.3
-delta_alpha = 0.4
+delta_alpha = 0.5
 
 smoothed_delta_w = np.zeros(3)
 hand_qpos_reordered = None
@@ -286,6 +286,51 @@ current_rotation = palm_down_rotation.copy()
 last_good_pos = init_pos.copy()
 last_good_rotation = palm_down_rotation.copy()
 
+hand_lost_frames = 0
+HAND_LOST_THRESHOLD = 10  # reset after 10 frames without hand
+max_rotation_speed = np.deg2rad(30)  # max degrees per frame
+
+position_initialized = False
+hand_entry_pos = None      # screen position when hand first detected
+hand_entry_sim = None      # sim position at that moment
+
+# Before the loop
+smoothed_hand_qpos = None
+finger_alpha = 0.3  # lower = smoother fingers
+
+fist_state = False
+FIST_ENTER_THRESHOLD = 0.13  # stricter - must be clearly closed to enter
+FIST_EXIT_THRESHOLD = 0.18   # looser - must be clearly open to exit
+
+def is_fist_hysteresis(landmarks, current_fist_state):
+    wrist = landmarks.landmark[0]
+    fingertips = [4, 8, 12, 16, 20]
+    distances = []
+    for tip_idx in fingertips:
+        tip = landmarks.landmark[tip_idx]
+        dist = np.sqrt((tip.x - wrist.x)**2 + (tip.y - wrist.y)**2)
+        distances.append(dist)
+    avg_dist = np.mean(distances)
+    
+    if current_fist_state:
+        # Already in fist - need to open more to exit
+        return avg_dist < FIST_EXIT_THRESHOLD
+    else:
+        # Not in fist - need to close more to enter
+        return avg_dist < FIST_ENTER_THRESHOLD
+    
+def is_pnp_degenerate(pts_2d):
+    palm_2d = pts_2d[PALM_INDICES]
+    try:
+        from scipy.spatial import ConvexHull
+        hull = ConvexHull(palm_2d)
+        area = hull.volume
+
+        print("hull area:", hull.volume)
+    except:
+        return True
+    return area < 4500  # tune this
+
 # --- Main Loop ---
 while not viewer.closed:
     frames = pipeline.wait_for_frames(timeout_ms=15000)
@@ -307,6 +352,7 @@ while not viewer.closed:
         break
 
     if results.multi_hand_landmarks:
+        hand_lost_frames = 0  # reset counter when hand seen
         hand_seen = True
         landmarks = results.multi_hand_landmarks[0]
         wrist = landmarks.landmark[0]
@@ -326,16 +372,32 @@ while not viewer.closed:
             sim_x = sim_x_fixed
 
         # --- Position ---
-        sim_y = np.interp(wrist.x, [0.2, 0.8], [sim_y_range[0], sim_y_range[1]])
-        sim_z = np.interp(wrist.y, [0.2, 0.8], [sim_z_range[1], sim_z_range[0]])
-        target_pos = np.array([sim_x, sim_y, sim_z])
-        smoothed_pos = alpha * target_pos + (1 - alpha) * smoothed_pos
+        if not position_initialized:
+            # First frame of detection - record where hand entered
+            hand_entry_pos = np.array([wrist.x, wrist.y, depth])
+            hand_entry_sim = init_pos.copy()
+            smoothed_pos = init_pos.copy()
+            position_initialized = True
+        else:
+            # Track DELTA from entry point, apply to init_pos
+            dx_phy = depth - hand_entry_pos[2]
+            dy_screen = wrist.x - hand_entry_pos[0]
+            dz_screen = wrist.y - hand_entry_pos[1]
+
+            sim_x = init_pos[0] + np.interp(dx_phy, [-0.15, 0.15], [-0.4, 0.4])
+            sim_y = init_pos[1] + np.interp(dy_screen, [-0.3, 0.3], [-0.3, 0.3])
+            sim_z = init_pos[2] + np.interp(dz_screen, [-0.3, 0.3], [0.2, -0.2])
+
+            target_pos = np.array([sim_x, sim_y, sim_z])
+            smoothed_pos = alpha * target_pos + (1 - alpha) * smoothed_pos
 
         # --- Rotation via PnP ---
         pts_2d = np.array([[lm.x * 640, lm.y * 480] for lm in landmarks.landmark], dtype=np.float64)
         success, rvec, tvec = solve_hand_pnp(pts_2d, camera_matrix, dist_coeffs)
 
-        if success:
+        degenerate = is_pnp_degenerate(pts_2d)
+
+        if success and not degenerate:
             R_cam, _ = cv2.Rodrigues(rvec)
             R_sim = R_cam_to_sim @ R_cam
 
@@ -343,10 +405,10 @@ while not viewer.closed:
                 initial_R_sim = R_sim.copy()
 
             R_delta = R_sim @ initial_R_sim.T
-            delta_w = so3_log(R_delta)
-            smoothed_delta_w = (1 - delta_alpha) * smoothed_delta_w + delta_alpha * delta_w
-            R_delta_smooth = so3_exp(smoothed_delta_w)
-            current_rotation = R_delta_smooth @ palm_down_rotation
+            # delta_w = so3_log(R_delta)
+            # smoothed_delta_w = (1 - delta_alpha) * smoothed_delta_w + delta_alpha * delta_w
+            # R_delta_smooth = so3_exp(smoothed_delta_w)
+            current_rotation = R_delta @ palm_down_rotation
 
             q_cur = rotmat_to_quat(current_rotation)
             q_smooth = rotmat_to_quat(smoothed_rotation)
@@ -355,12 +417,20 @@ while not viewer.closed:
             current_rotation = smoothed_rotation
 
             # Snap protection
+           # Replace snap protection block with this:
             R_err = last_good_rotation.T @ current_rotation
             angle = np.arccos(np.clip((np.trace(R_err) - 1) / 2, -1.0, 1.0))
-            if angle > np.deg2rad(35): # Can try 90 too
+            if angle > np.deg2rad(60): # Can try 35
+                # Big jump - reject entirely
                 current_rotation = last_good_rotation.copy()
+            elif angle > max_rotation_speed:
+                # Moving too fast - clamp to max speed
+                w = so3_log(R_err)
+                w_clamped = w * (max_rotation_speed / angle)
+                R_clamped = so3_exp(w_clamped)
+                current_rotation = last_good_rotation @ R_clamped
         else:
-            current_rotation = palm_down_rotation
+            current_rotation = last_good_rotation.copy()
 
         last_good_pos = smoothed_pos.copy()
         last_good_rotation = current_rotation.copy()
@@ -378,8 +448,18 @@ while not viewer.closed:
             ref_value = joint_pos[task_indices, :] - joint_pos[origin_indices, :]
             hand_qpos = retargeter.retarget(ref_value)
             hand_qpos_reordered = hand_qpos[retargeting_to_sapien]
+            if smoothed_hand_qpos is None:
+                smoothed_hand_qpos = hand_qpos_reordered.copy()
+            else:
+                smoothed_hand_qpos = finger_alpha * hand_qpos_reordered + (1 - finger_alpha) * smoothed_hand_qpos
     else:
-        initial_R_sim = None
+        hand_entry_pos = None
+        hand_entry_sim = None
+        position_initialized = False  # reset so next entry captures new anchor
+        hand_lost_frames += 1
+        if hand_lost_frames > HAND_LOST_THRESHOLD:
+            hand_lost_frames = 0
+            initial_R_sim = None
 
         if not hand_seen:
             palm_task.set_target(init_palm)
@@ -399,10 +479,24 @@ while not viewer.closed:
     )
     configuration.integrate_inplace(velocity, rate.dt)
 
+    # Only take arm joints from IK
     full_qpos = configuration.q.copy()
-    if hand_qpos_reordered is not None:
-        full_qpos[6:] = hand_qpos_reordered
+    arm_qpos = full_qpos[:6].copy()
+
+    # Apply arm + finger joints separately
+    if smoothed_hand_qpos is not None:
+        full_qpos[:6] = arm_qpos
+        full_qpos[6:] = smoothed_hand_qpos
+    else:
+        full_qpos[:6] = arm_qpos
+
     robot.set_qpos(full_qpos)
+
+    # Keep pinocchio in sync with ONLY arm joints
+    # Prevents finger joints from feeding back into IK next frame
+    sync_q = configuration.q.copy()
+    sync_q[6:] = q_init[6:]  # reset fingers to neutral for IK
+    configuration.update(sync_q)
 
     scene.step()
     scene.update_render()
