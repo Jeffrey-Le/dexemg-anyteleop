@@ -1,0 +1,53 @@
+# ─── Smoothing ────────────────────────────────────────────────────────────────
+alpha: 0.2            # position smoothing (lower = smoother, more lag)
+rotation_alpha: 0.15  # rotation slerp weight per frame
+finger_alpha: 0.3     # finger joint smoothing
+
+# ─── IK Costs ─────────────────────────────────────────────────────────────────
+position_cost: 1.0
+orientation_cost: 3.0
+posture_cost: 0.3
+
+# ─── Initial Joint Angles (UR5e arm, radians) ─────────────────────────────────
+q_init:
+  - -0.26       # shoulder_pan
+  - -1.25       # shoulder_lift
+  - 1.5707963   # elbow (pi/2)
+  - -0.35       # wrist_1
+  - 1.5         # wrist_2
+  - 1.5         # wrist_3
+
+# ─── Workspace (metres) ───────────────────────────────────────────────────────
+sim_x_range_phy: [0.2, 0.5]   # physical depth range from camera
+sim_x_range_offset: 0.8       # ± sim x offset around init position
+sim_y_range_offset: 0.3       # ± sim y offset around init position
+sim_z_range_offset: 0.2       # ± sim z offset around init position
+
+# Delta-based position mapping
+dx_phy_range: [-0.15, 0.15]   # physical depth delta
+dx_sim_range: [-0.4,  0.4]    # sim depth delta
+dy_screen_range: [-0.3, 0.3]  # screen x delta
+dy_sim_range: [-0.3,  0.3]    # sim y delta
+dz_screen_range: [-0.3, 0.3]  # screen y delta
+dz_sim_range: [0.2,  -0.2]    # sim z delta (inverted)
+
+# ─── Hand Tracking ────────────────────────────────────────────────────────────
+hand_lost_threshold: 10       # frames before resetting rotation anchor
+rotation_deadzone_deg: 2.0    # ignore rotations smaller than this (degrees)
+
+# ─── MediaPipe ────────────────────────────────────────────────────────────────
+mp_max_hands: 1
+mp_detection_conf: 0.7
+mp_tracking_conf: 0.5
+
+# ─── RealSense ────────────────────────────────────────────────────────────────
+rs_width: 640
+rs_height: 480
+rs_fps: 30
+
+# ─── SAPIEN Viewer ────────────────────────────────────────────────────────────
+viewer_xyz: [1.5, 0.0, 1.5]
+viewer_rpy: [0.0, -0.5, 3.14]
+
+# ─── Loop ─────────────────────────────────────────────────────────────────────
+loop_frequency: 30.0
