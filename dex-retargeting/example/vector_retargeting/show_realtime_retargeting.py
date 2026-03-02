@@ -93,6 +93,8 @@ def start_retargeting(queue: multiprocessing.Queue, robot_dir: str, config_path:
     else:
         filepath = str(filepath)
 
+    filepath = "/home/dexemg/Desktop/dex-teleop/dex-retargeting/assets/robots/hands/ability_hand/ability_hand_right.urdf"
+
     robot = loader.load(filepath)
 
     if "ability" in robot_name:
@@ -113,6 +115,7 @@ def start_retargeting(queue: multiprocessing.Queue, robot_dir: str, config_path:
     # Different robot loader may have different orders for joints
     sapien_joint_names = [joint.get_name() for joint in robot.get_active_joints()]
     retargeting_joint_names = retargeting.joint_names
+    print(retargeting_joint_names)
     retargeting_to_sapien = np.array(
         [retargeting_joint_names.index(name) for name in sapien_joint_names]
     ).astype(int)
