@@ -7,6 +7,8 @@ DEX_DIR  = os.path.join(BASE_DIR, "dex-retargeting")
 
 RETARGETING_CONFIG = os.path.join(DEX_DIR, "src/dex_retargeting/configs/teleop/shadow_hand_right_dexpilot.yml")
 ROBOT_URDF         = os.path.join(DEX_DIR, "assets/robots/assembly/ur5e_shadow/ur5e_shadow_right_hand_glb.urdf")
+# RETARGETING_CONFIG = os.path.join(DEX_DIR, "src/dex_retargeting/configs/teleop/inspire_hand_right_dexpilot.yml")
+# ROBOT_URDF         = os.path.join(DEX_DIR, "assets/robots/assembly/rm75_inspire/rm75_inspire_right_hand.urdf")
 
 # ─── Load YAML ────────────────────────────────────────────────────────────────
 _yml_path = os.path.join(BASE_DIR, "config.yml")
@@ -42,6 +44,8 @@ DZ_SIM_RANGE    = tuple(_cfg["dz_sim_range"])
 # ─── Hand tracking ────────────────────────────────────────────────────────────
 HAND_LOST_THRESHOLD = _cfg["hand_lost_threshold"]
 ROTATION_DEADZONE   = _cfg["rotation_deadzone_deg"]
+MIN_CONFIDENCE = _cfg["min_confidence"]
+FINGER_QVEL_MAX = _cfg["finger_qvel_max"]
 
 # ─── MediaPipe ────────────────────────────────────────────────────────────────
 MP_MAX_HANDS      = _cfg["mp_max_hands"]

@@ -1,12 +1,12 @@
 # ─── Smoothing ────────────────────────────────────────────────────────────────
 alpha: 0.2            # position smoothing (lower = smoother, more lag)
-rotation_alpha: 0.15  # rotation slerp weight per frame
-finger_alpha: 0.3     # finger joint smoothing
+rotation_alpha: 0.2  # rotation slerp weight per frame
+finger_alpha: 0.8     # finger joint smoothing
 
 # ─── IK Costs ─────────────────────────────────────────────────────────────────
 position_cost: 1.0
 orientation_cost: 3.0
-posture_cost: 0.3
+posture_cost: 0.15
 
 # ─── Initial Joint Angles (UR5e arm, radians) ─────────────────────────────────
 q_init:
@@ -16,6 +16,13 @@ q_init:
   - -0.35       # wrist_1
   - 1.5         # wrist_2
   - 1.5         # wrist_3
+# q_init:
+#   - -0.26       # shoulder_pan
+#   - -1.25       # shoulder_lift
+#   - 1.5707963   # elbow (pi/2)
+#   - -0.19       # wrist_1
+#   - 1.5         # wrist_2
+#   - 1.5         # wrist_3
 
 # ─── Workspace (metres) ───────────────────────────────────────────────────────
 sim_x_range_phy: [0.2, 0.5]   # physical depth range from camera
@@ -29,11 +36,13 @@ dx_sim_range: [-0.4,  0.4]    # sim depth delta
 dy_screen_range: [-0.3, 0.3]  # screen x delta
 dy_sim_range: [-0.3,  0.3]    # sim y delta
 dz_screen_range: [-0.3, 0.3]  # screen y delta
-dz_sim_range: [0.2,  -0.2]    # sim z delta (inverted)
+dz_sim_range: [0.35,  -0.35]    # sim z delta (inverted)
 
 # ─── Hand Tracking ────────────────────────────────────────────────────────────
 hand_lost_threshold: 10       # frames before resetting rotation anchor
 rotation_deadzone_deg: 2.0    # ignore rotations smaller than this (degrees)
+min_confidence: 0.6
+finger_qvel_max: 15
 
 # ─── MediaPipe ────────────────────────────────────────────────────────────────
 mp_max_hands: 1

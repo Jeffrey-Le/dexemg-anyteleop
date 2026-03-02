@@ -22,6 +22,7 @@ import mediapipe as mp
 import config as cfg
 from utils import get_hand_rotation, smooth_rotation, rotmat_to_quat, quat_to_rotmat, slerp
 from robot_setup import build_scene, build_ik
+from scene_setup import build_scene_objects
 from camera_setup import build_camera
 from retargeting_setup import build_retargeter
 
@@ -38,7 +39,8 @@ from single_hand_detector import SingleHandDetector
 detector = SingleHandDetector(hand_type="Right", selfie=False)
 
 # ─── Robot / IK ───────────────────────────────────────────────────────────────
-scene, robot, viewer = build_scene()
+# scene, robot, viewer = build_scene()
+scene, robot, viewer, table, boxes = build_scene()
 model, data, configuration, q_init, configuration_limit = build_ik(robot)
 
 init_palm = configuration.get_transform_frame_to_world("palm")
@@ -84,6 +86,24 @@ R_mp_to_sim = np.array([
     [0,  0,  1],
     [ 0,  1,  0]
 ], dtype=np.float64)
+
+robot_dof = robot.get_dof() - len(retargeting_to_sapien)
+
+print(f"Robot Hand DoF: {robot_dof}")
+
+# --- One-time DOF bookkeeping ---
+arm_dof = robot.get_dof() - len(retargeting_to_sapien)
+finger_start = arm_dof
+finger_joints = robot.get_active_joints()[finger_start:]
+assert len(finger_joints) == len(retargeting_to_sapien), "Finger joints slice mismatch"
+
+# --- One-time finger PD drive setup (tune these for snappy grasp) ---
+Kp_finger = 8000.0   # try 800 -> 6000
+Kd_finger = 300.0    # try 40 -> 300
+Fmax_finger = 500.0   # try 10 -> 200
+
+for j in finger_joints:
+    j.set_drive_property(stiffness=Kp_finger, damping=Kd_finger, force_limit=Fmax_finger)
 
 # ─── Main Loop ────────────────────────────────────────────────────────────────
 while not viewer.closed:
@@ -140,7 +160,7 @@ while not viewer.closed:
 
         # ── Rotation ──────────────────────────────────────────────────────────
         world_landmarks = results.multi_hand_world_landmarks[0]
-        R_hand = get_hand_rotation(world_landmarks)
+        R_hand, confidence = get_hand_rotation(world_landmarks)
         R_hand = R_mp_to_sim @ R_hand
 
         if initial_R_hand is None:
@@ -148,9 +168,12 @@ while not viewer.closed:
 
         R_delta          = R_hand @ initial_R_hand.T
         current_rotation = R_delta @ palm_down_rotation
+
+        effective_alpha = cfg.ROTATION_ALPHA 
+
         smoothed_rotation = smooth_rotation(
             current_rotation, smoothed_rotation,
-            cfg.ROTATION_ALPHA, cfg.ROTATION_DEADZONE
+            effective_alpha, cfg.ROTATION_DEADZONE
         )
         current_rotation = smoothed_rotation
 
@@ -204,20 +227,44 @@ while not viewer.closed:
         solver="quadprog",
         limits=[configuration_limit],
     )
-    configuration.integrate_inplace(velocity, rate.dt)
 
-    # ── Apply joints ──────────────────────────────────────────────────────────
-    full_qpos = configuration.q.copy()
+    # ── Apply ARM via qvel (physics-safe) ──────────────────────────────────────
+    qvel = np.zeros(robot.get_dof(), dtype=np.float64)
+
+    # IMPORTANT: use arm_dof (not robot_dof) here
+    qvel[:arm_dof] = velocity[:arm_dof]
+
+    # optional arm clamp (helps stability near contact)
+    max_arm_qvel = 2.5
+    qvel[:arm_dof] = np.clip(qvel[:arm_dof], -max_arm_qvel, max_arm_qvel)
+
+    robot.set_qvel(qvel)
+
+    # ── Apply FINGERS via PD drive targets (Dex qpos -> PD target) ─────────────
     if smoothed_hand_qpos is not None:
-        full_qpos[6:] = smoothed_hand_qpos
-    robot.set_qpos(full_qpos)
+        # (Optional) clamp to finger limits to avoid tiny negative values
+        # Better: use true per-joint limits if you have them
+        finger_tgt = np.clip(smoothed_hand_qpos, 0.0, 1.57079632679)
 
-    # Keep pinocchio in sync with arm joints only (prevents finger feedback)
-    sync_q      = configuration.q.copy()
-    sync_q[6:]  = q_init[6:]
-    configuration.update(sync_q)
+        for j, tgt in zip(finger_joints, finger_tgt):
+            j.set_drive_target(float(tgt))
 
+    # ── Step physics ──────────────────────────────────────────────────────────
     scene.step()
+
+    # ── Sync Pink/Pinocchio from simulated qpos (with tolerance clamp) ─────────
+    q = robot.get_qpos().copy()
+
+    lower = model.lowerPositionLimit.copy()
+    upper = model.upperPositionLimit.copy()
+    tol = 1e-4
+
+    # If your pinocchio q includes extra entries (floating base), this will mismatch.
+    # In your case you appear to be using fixed-base, so shapes should match.
+    q = np.minimum(np.maximum(q, lower + tol), upper - tol)
+
+    configuration.update(q)
+
     scene.update_render()
     viewer.render()
     rate.sleep()

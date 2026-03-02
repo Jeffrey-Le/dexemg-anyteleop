@@ -109,6 +109,12 @@ def get_hand_rotation(world_landmarks):
     pinky_mcp  = lm(17)
     middle_mcp = lm(9)
 
+    # Geometric confidence - measures how spread out palm landmarks are
+    # Low spread = landmarks bunched up = unreliable rotation estimate
+    palm_pts   = np.array([wrist, index_mcp, pinky_mcp, middle_mcp])
+    spread     = float(np.mean(np.std(palm_pts, axis=0)))
+    confidence = float(np.clip(spread / 0.04, 0.0, 1.0))  # tune 0.08
+
     # X: across palm (pinky → index)
     x = index_mcp - pinky_mcp
     x = x / np.linalg.norm(x)
@@ -134,4 +140,4 @@ def get_hand_rotation(world_landmarks):
         U[:, -1] *= -1
         R = U @ Vt
 
-    return R
+    return R, confidence
