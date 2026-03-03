@@ -135,9 +135,6 @@ Fmax_finger = 25.0
 for j in finger_joints:
     set_joint_drive(j, Kp_finger, Kd_finger, Fmax_finger)
 
-SUBSTEPS = 8   # 30 Hz control -> 240 Hz physics-ish
-prev_finger_target = None
-
 # ─── Main Loop ────────────────────────────────────────────────────────────────
 while not viewer.closed:
     frames = pipeline.wait_for_frames(timeout_ms=15000)
@@ -258,35 +255,19 @@ while not viewer.closed:
     )
     configuration.integrate_inplace(velocity, rate.dt)
 
-    # ── APPLY JOINTS (arm teleport, fingers physical) ───────────────────────────
-    q = robot.get_qpos()
-    q[:6] = configuration.q[:6]
-    robot.set_qpos(q)
-
-    # Fingers: drive targets (no teleport into contact)
+    # ── APPLY JOINTS  ──────────────────────────────────────
+    full_qpos = configuration.q.copy()
     if smoothed_hand_qpos is not None:
-        if prev_finger_target is None:
-            prev_finger_target = smoothed_hand_qpos.copy()
+        full_qpos[6:] = smoothed_hand_qpos
+    robot.set_qpos(full_qpos)
 
-        # Clamp finger speed to avoid instant penetration (rad/s -> rad per tick)
-        max_step = cfg.FINGER_QVEL_MAX * rate.dt   # e.g., 3 * 1/30 = 0.1 rad
-        delta = smoothed_hand_qpos - prev_finger_target
-        delta = np.clip(delta, -max_step, max_step)
-        cmd = prev_finger_target + delta
-        prev_finger_target = cmd.copy()
-
-        for i, j in enumerate(finger_joints):
-            j.set_drive_target(float(cmd[i]))
-
-    # Keep pinocchio fingers fixed (prevents finger feedback into IK)
+    # Keep pinocchio fingers fixed 
     sync_q = configuration.q.copy()
     sync_q[6:] = q_init[6:]
     configuration.update(sync_q)
 
-    # ── Step physics (substeps for stable contact) ───────────────────────────────
-    for _ in range(SUBSTEPS):
-        scene.step()
-
+    # ── Step physics ───────────────────────────────────────────────
+    scene.step()
     scene.update_render()
     viewer.render()
     rate.sleep()
