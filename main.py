@@ -12,19 +12,36 @@ sys.path.insert(0, DEX_DIR)
 import numpy as np
 import cv2
 import pinocchio as pin
-import pink
 from pink import solve_ik
 from pink.tasks import FrameTask, PostureTask
-from pink.limits import ConfigurationLimit
 from loop_rate_limiters import RateLimiter
 import mediapipe as mp
 
 import config as cfg
-from utils import get_hand_rotation, smooth_rotation, rotmat_to_quat, quat_to_rotmat, slerp
+from utils import get_hand_rotation, smooth_rotation
 from robot_setup import build_scene, build_ik
-from scene_setup import build_scene_objects
 from camera_setup import build_camera
 from retargeting_setup import build_retargeter
+
+def set_joint_drive(joint, stiffness, damping, force_limit):
+    try:
+        joint.set_drive_property(float(stiffness), float(damping), float(force_limit))
+        return
+    except TypeError:
+        pass
+    try:
+        joint.set_drive_property(stiffness=float(stiffness), damping=float(damping), force_limit=float(force_limit))
+        return
+    except TypeError:
+        pass
+    try:
+        joint.set_drive_property(float(stiffness), float(damping))
+    except TypeError:
+        try:
+            joint.set_drive_property(stiffness=float(stiffness), damping=float(damping))
+        except TypeError:
+            print("[err] cannot set drive for joint", joint)
+            return
 
 # ─── MediaPipe ────────────────────────────────────────────────────────────────
 mp_hands = mp.solutions.hands
@@ -39,8 +56,7 @@ from single_hand_detector import SingleHandDetector
 detector = SingleHandDetector(hand_type="Right", selfie=False)
 
 # ─── Robot / IK ───────────────────────────────────────────────────────────────
-# scene, robot, viewer = build_scene()
-scene, robot, viewer, table, boxes = build_scene()
+scene, robot, viewer, table, objects = build_scene(object="bottle")  # box / grasp_box / cylinder / bottle
 model, data, configuration, q_init, configuration_limit = build_ik(robot)
 
 init_palm = configuration.get_transform_frame_to_world("palm")
@@ -59,13 +75,13 @@ retargeter, retargeting_to_sapien = build_retargeter(robot)
 pipeline, align = build_camera()
 
 # ─── State ────────────────────────────────────────────────────────────────────
-init_pos          = init_palm.translation.copy()
+init_pos           = init_palm.translation.copy()
 palm_down_rotation = init_palm.rotation.copy()
 
-smoothed_pos      = init_pos.copy()
-smoothed_rotation = palm_down_rotation.copy()
-current_rotation  = palm_down_rotation.copy()
-last_good_pos     = init_pos.copy()
+smoothed_pos       = init_pos.copy()
+smoothed_rotation  = palm_down_rotation.copy()
+current_rotation   = palm_down_rotation.copy()
+last_good_pos      = init_pos.copy()
 last_good_rotation = palm_down_rotation.copy()
 
 initial_R_hand       = None
@@ -74,36 +90,53 @@ hand_lost_frames     = 0
 position_initialized = False
 hand_entry_pos       = None
 
-smoothed_hand_qpos   = None
-hand_qpos_reordered  = None
-
-sim_x_fixed = init_pos[0]
+smoothed_hand_qpos  = None
 
 rate = RateLimiter(frequency=cfg.LOOP_FREQUENCY)
 
 R_mp_to_sim = np.array([
-    [ 1,  0, 0],
-    [0,  0,  1],
-    [ 0,  1,  0]
+    [1, 0, 0],
+    [0, 0, 1],
+    [0, 1, 0],
 ], dtype=np.float64)
 
-robot_dof = robot.get_dof() - len(retargeting_to_sapien)
-
-print(f"Robot Hand DoF: {robot_dof}")
-
-# --- One-time DOF bookkeeping ---
+# bookkeeping
 arm_dof = robot.get_dof() - len(retargeting_to_sapien)
 finger_start = arm_dof
-finger_joints = robot.get_active_joints()[finger_start:]
-assert len(finger_joints) == len(retargeting_to_sapien), "Finger joints slice mismatch"
+finger_count = len(retargeting_to_sapien)
+print(f"Arm DOF: {arm_dof}, Finger DOF: {finger_count}")
 
-# --- One-time finger PD drive setup (tune these for snappy grasp) ---
-Kp_finger = 8000.0   # try 800 -> 6000
-Kd_finger = 300.0    # try 40 -> 300
-Fmax_finger = 500.0   # try 10 -> 200
+arm_dof = 6
+finger_joints = robot.get_active_joints()[arm_dof:]
+prev_finger_target = None
+
+def set_joint_drive(j, kp, kd, fmax):
+    # SAPIEN 3 beta safe calling
+    try:
+        j.set_drive_property(float(kp), float(kd), float(fmax))
+        return
+    except TypeError:
+        pass
+    try:
+        j.set_drive_property(stiffness=float(kp), damping=float(kd), force_limit=float(fmax))
+        return
+    except TypeError:
+        pass
+    try:
+        j.set_drive_property(float(kp), float(kd))
+    except TypeError:
+        j.set_drive_property(stiffness=float(kp), damping=float(kd))
+
+# Conservative gains (increase slowly)
+Kp_finger = 120.0
+Kd_finger = 8.0
+Fmax_finger = 25.0
 
 for j in finger_joints:
-    j.set_drive_property(stiffness=Kp_finger, damping=Kd_finger, force_limit=Fmax_finger)
+    set_joint_drive(j, Kp_finger, Kd_finger, Fmax_finger)
+
+SUBSTEPS = 8   # 30 Hz control -> 240 Hz physics-ish
+prev_finger_target = None
 
 # ─── Main Loop ────────────────────────────────────────────────────────────────
 while not viewer.closed:
@@ -114,25 +147,23 @@ while not viewer.closed:
     if not color_frame or not depth_frame:
         continue
 
-    import numpy as np
-    import pyrealsense2 as rs
-
     color_image = np.asanyarray(color_frame.get_data())
     depth_image = np.asanyarray(depth_frame.get_data()) * 0.001
     color_rgb   = cv2.cvtColor(color_image, cv2.COLOR_BGR2RGB)
 
     results = hands.process(color_rgb)
     _, joint_pos, keypoint_2d, _ = detector.detect(color_rgb)
-    color_image = detector.draw_skeleton_on_image(color_image, keypoint_2d, style="default")
-    cv2.imshow("Hand Tracking", color_image)
+
+    dbg = detector.draw_skeleton_on_image(color_image.copy(), keypoint_2d, style="default")
+    cv2.imshow("Hand Tracking", dbg)
     if cv2.waitKey(1) & 0xFF == ord("q"):
         break
 
     if results.multi_hand_landmarks:
         hand_lost_frames = 0
-        hand_seen        = True
-        landmarks        = results.multi_hand_landmarks[0]
-        wrist            = landmarks.landmark[0]
+        hand_seen = True
+        landmarks = results.multi_hand_landmarks[0]
+        wrist = landmarks.landmark[0]
 
         # ── Depth ─────────────────────────────────────────────────────────────
         px = int(np.clip(wrist.x * cfg.RS_WIDTH,  3, cfg.RS_WIDTH  - 4))
@@ -143,8 +174,8 @@ while not viewer.closed:
 
         # ── Position ──────────────────────────────────────────────────────────
         if not position_initialized:
-            hand_entry_pos       = np.array([wrist.x, wrist.y, depth])
-            smoothed_pos         = init_pos.copy()
+            hand_entry_pos = np.array([wrist.x, wrist.y, depth])
+            smoothed_pos = init_pos.copy()
             position_initialized = True
         else:
             dx_phy    = depth   - hand_entry_pos[2]
@@ -152,10 +183,10 @@ while not viewer.closed:
             dz_screen = wrist.y - hand_entry_pos[1]
 
             sim_x = init_pos[0] + np.interp(dx_phy,    cfg.DX_PHY_RANGE,    cfg.DX_SIM_RANGE)
-            sim_y = init_pos[1] + np.interp(dy_screen,  cfg.DY_SCREEN_RANGE, cfg.DY_SIM_RANGE)
-            sim_z = init_pos[2] + np.interp(dz_screen,  cfg.DZ_SCREEN_RANGE, cfg.DZ_SIM_RANGE)
+            sim_y = init_pos[1] + np.interp(dy_screen, cfg.DY_SCREEN_RANGE, cfg.DY_SIM_RANGE)
+            sim_z = init_pos[2] + np.interp(dz_screen, cfg.DZ_SCREEN_RANGE, cfg.DZ_SIM_RANGE)
 
-            target_pos   = np.array([sim_x, sim_y, sim_z])
+            target_pos = np.array([sim_x, sim_y, sim_z])
             smoothed_pos = cfg.ALPHA * target_pos + (1 - cfg.ALPHA) * smoothed_pos
 
         # ── Rotation ──────────────────────────────────────────────────────────
@@ -166,23 +197,21 @@ while not viewer.closed:
         if initial_R_hand is None:
             initial_R_hand = R_hand.copy()
 
-        R_delta          = R_hand @ initial_R_hand.T
+        R_delta = R_hand @ initial_R_hand.T
         current_rotation = R_delta @ palm_down_rotation
-
-        effective_alpha = cfg.ROTATION_ALPHA 
 
         smoothed_rotation = smooth_rotation(
             current_rotation, smoothed_rotation,
-            effective_alpha, cfg.ROTATION_DEADZONE
+            cfg.ROTATION_ALPHA, cfg.ROTATION_DEADZONE
         )
         current_rotation = smoothed_rotation
 
-        last_good_pos      = smoothed_pos.copy()
+        last_good_pos = smoothed_pos.copy()
         last_good_rotation = current_rotation.copy()
 
-        target_pose             = pin.SE3.Identity()
+        target_pose = pin.SE3.Identity()
         target_pose.translation = smoothed_pos.copy()
-        target_pose.rotation    = current_rotation
+        target_pose.rotation = current_rotation
         palm_task.set_target(target_pose)
 
         # ── Finger retargeting ────────────────────────────────────────────────
@@ -203,20 +232,20 @@ while not viewer.closed:
                 )
 
     else:
-        hand_lost_frames     += 1
-        position_initialized  = False
-        hand_entry_pos        = None
+        hand_lost_frames += 1
+        position_initialized = False
+        hand_entry_pos = None
 
         if hand_lost_frames > cfg.HAND_LOST_THRESHOLD:
             hand_lost_frames = 0
-            initial_R_hand   = None
+            initial_R_hand = None
 
         if not hand_seen:
             palm_task.set_target(init_palm)
         else:
-            target_pose             = pin.SE3.Identity()
+            target_pose = pin.SE3.Identity()
             target_pose.translation = last_good_pos.copy()
-            target_pose.rotation    = last_good_rotation.copy()
+            target_pose.rotation = last_good_rotation.copy()
             palm_task.set_target(target_pose)
 
     # ── IK ────────────────────────────────────────────────────────────────────
@@ -227,43 +256,36 @@ while not viewer.closed:
         solver="quadprog",
         limits=[configuration_limit],
     )
+    configuration.integrate_inplace(velocity, rate.dt)
 
-    # ── Apply ARM via qvel (physics-safe) ──────────────────────────────────────
-    qvel = np.zeros(robot.get_dof(), dtype=np.float64)
+    # ── APPLY JOINTS (arm teleport, fingers physical) ───────────────────────────
+    q = robot.get_qpos()
+    q[:6] = configuration.q[:6]
+    robot.set_qpos(q)
 
-    # IMPORTANT: use arm_dof (not robot_dof) here
-    qvel[:arm_dof] = velocity[:arm_dof]
-
-    # optional arm clamp (helps stability near contact)
-    max_arm_qvel = 2.5
-    qvel[:arm_dof] = np.clip(qvel[:arm_dof], -max_arm_qvel, max_arm_qvel)
-
-    robot.set_qvel(qvel)
-
-    # ── Apply FINGERS via PD drive targets (Dex qpos -> PD target) ─────────────
+    # Fingers: drive targets (no teleport into contact)
     if smoothed_hand_qpos is not None:
-        # (Optional) clamp to finger limits to avoid tiny negative values
-        # Better: use true per-joint limits if you have them
-        finger_tgt = np.clip(smoothed_hand_qpos, 0.0, 1.57079632679)
+        if prev_finger_target is None:
+            prev_finger_target = smoothed_hand_qpos.copy()
 
-        for j, tgt in zip(finger_joints, finger_tgt):
-            j.set_drive_target(float(tgt))
+        # Clamp finger speed to avoid instant penetration (rad/s -> rad per tick)
+        max_step = cfg.FINGER_QVEL_MAX * rate.dt   # e.g., 3 * 1/30 = 0.1 rad
+        delta = smoothed_hand_qpos - prev_finger_target
+        delta = np.clip(delta, -max_step, max_step)
+        cmd = prev_finger_target + delta
+        prev_finger_target = cmd.copy()
 
-    # ── Step physics ──────────────────────────────────────────────────────────
-    scene.step()
+        for i, j in enumerate(finger_joints):
+            j.set_drive_target(float(cmd[i]))
 
-    # ── Sync Pink/Pinocchio from simulated qpos (with tolerance clamp) ─────────
-    q = robot.get_qpos().copy()
+    # Keep pinocchio fingers fixed (prevents finger feedback into IK)
+    sync_q = configuration.q.copy()
+    sync_q[6:] = q_init[6:]
+    configuration.update(sync_q)
 
-    lower = model.lowerPositionLimit.copy()
-    upper = model.upperPositionLimit.copy()
-    tol = 1e-4
-
-    # If your pinocchio q includes extra entries (floating base), this will mismatch.
-    # In your case you appear to be using fixed-base, so shapes should match.
-    q = np.minimum(np.maximum(q, lower + tol), upper - tol)
-
-    configuration.update(q)
+    # ── Step physics (substeps for stable contact) ───────────────────────────────
+    for _ in range(SUBSTEPS):
+        scene.step()
 
     scene.update_render()
     viewer.render()

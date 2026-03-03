@@ -1,12 +1,12 @@
 # ─── Smoothing ────────────────────────────────────────────────────────────────
-alpha: 0.2            # position smoothing (lower = smoother, more lag)
-rotation_alpha: 0.2  # rotation slerp weight per frame
-finger_alpha: 0.8     # finger joint smoothing
+alpha: 0.08            # position smoothing (lower = smoother, more lag)
+rotation_alpha: 0.08  # rotation slerp weight per frame
+finger_alpha: 0.08     # finger joint smoothing
 
 # ─── IK Costs ─────────────────────────────────────────────────────────────────
 position_cost: 1.0
-orientation_cost: 3.0
-posture_cost: 0.15
+orientation_cost: 4.0
+posture_cost: 0.02
 
 # ─── Initial Joint Angles (UR5e arm, radians) ─────────────────────────────────
 q_init:
@@ -42,7 +42,7 @@ dz_sim_range: [0.35,  -0.35]    # sim z delta (inverted)
 hand_lost_threshold: 10       # frames before resetting rotation anchor
 rotation_deadzone_deg: 2.0    # ignore rotations smaller than this (degrees)
 min_confidence: 0.6
-finger_qvel_max: 15
+finger_qvel_max: 3.0
 
 # ─── MediaPipe ────────────────────────────────────────────────────────────────
 mp_max_hands: 1
